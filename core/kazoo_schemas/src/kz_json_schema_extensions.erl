@@ -16,9 +16,32 @@
 -spec extra_validator(jesse:json_term(), jesse_state:state()) -> jesse_state:state().
 extra_validator(Value, State) ->
     Schema = jesse_state:get_current_schema(State),
+    %%Str = lists:flatten(lists:duplicate(100, "=")),
+    %%lager:debug("~n~p~nValue: ~p~nSchema: ~p~nState: ~p~n~p", [Str, Value, Schema, State, Str]),
+    State1 = check_params_stability_level(Value, Schema, State),
+    %%lager:debug("~n~p~nValue: ~p~nSchema: ~p~n~p", [Str, Value, Schema, Str]),
+    %case is_binary(Value) orelse is_atom(Value) orelse is_number(Value) orelse is_list(Value) of
+    %    false ->
+    %        {ValList} = Value,
+    %        {Elem, _} = hd(ValList),
+    %        case lists:member(Elem, [<<"dialog_subscribed_mwi_prefix">> ,<<"hangups_to_monitor">>
+    %                                ,<<"inactivity_timeout_s">> ,<<"attempt_failure_count">>
+    %                                ,<<"aging_expiry_d">> ,<<"enable">>, <<"default_enabled">>
+    %                                ])  of
+    %            true ->
+    %                ok;
+    %            false ->
+    %                %%Str = lists:flatten(lists:duplicate(100, "=")),
+    %                lager:debug("~n~p~nValue: ~p~nSchema: ~p~nState: ~p~n~p",
+    %                            [Str, Value, Schema, State, Str]),
+    %                check_params_stability_level(Value, Schema, State)
+    %        end;
+    %    _ ->
+    %        ok
+    %end,
     case kz_json:is_true(<<"kazoo-validation">>, Schema, 'false') of
-        'true' -> extra_validation(Value, State);
-        'false' -> State
+        'true' -> extra_validation(Value, State1);
+        'false' -> State1
     end.
 
 -spec extra_validation(jesse:json_term(), jesse_state:state()) -> jesse_state:state().
@@ -115,3 +138,45 @@ validate_attachment_oauth_doc_id(Value, State) ->
             lager:debug("~s", [ErrorMsg]),
             jesse_error:handle_data_invalid('external_error', ErrorMsg, State)
     end.
+
+check_params_stability_level(Value, Schema, State) ->
+    case {kz_json:get_value(<<"properties">>, Schema),
+          kz_json:get_value(<<"id">>, Schema)} of
+        {'undefined', _} ->
+            %lager:debug("Skipping schema with out `properties' property"),
+            State;
+        {Properties, Id} when Id /= <<"system_config.omnipresence">>
+                              andalso Id /= <<"system_config.webhooks">>
+                              andalso Id /= <<"system_config.hangups">> ->
+            {ok, CBConfig} = kz_datamgr:open_cache_doc(<<"system_config">>, <<"crossbar">>),
+            SystemSL = kz_json:get_binary_value([<<"default">>, <<"stability_level">>], CBConfig),
+            SystemSLInt = stability_level_to_int(SystemSL),
+            lager:debug("Id: ~p, System stability_level(~p): ~p", [Id, SystemSLInt, SystemSL]),
+            Fun = fun(Key, _Val, Acc) ->
+                      SearchKey = [Key, <<"stability_level">>],
+                      PropSL = kz_json:get_value(SearchKey, Properties, <<"stable">>),
+                      lager:debug("~p SL: ~p", [Key, PropSL]),
+                      case  stability_level_to_int(PropSL) < SystemSLInt of
+                          true -> [Key | Acc];
+                          false -> Acc
+                      end
+                  end,
+            case kz_json:foldl(Fun, [], Value) of
+                [] ->
+                    State;
+                InvalidKeys ->
+                    InvalidKeysBin = binary:list_to_bin(lists:join(<<", ">>, InvalidKeys)),
+                    %lager:debug("InvalidKeys found: ~p, InvalidKeysBin: ~p", [InvalidKeys, InvalidKeysBin]),
+                    ErrorMsg = <<"Invalid keys with lower stability level than ",
+                                 SystemSL/binary, " : ", InvalidKeysBin/binary>>,
+                    lager:debug("~s", [ErrorMsg]),
+                    jesse_error:handle_data_invalid('external_error', ErrorMsg, State)
+            end;
+        _ ->
+            State
+    end.
+
+-spec stability_level_to_int(kz_term:ne_binary()) -> pos_integer().
+stability_level_to_int(<<"stable">>) -> 3;
+stability_level_to_int(<<"beta">>) -> 2;
+stability_level_to_int(<<"alpha">>) -> 1.

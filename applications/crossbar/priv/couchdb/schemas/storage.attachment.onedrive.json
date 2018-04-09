@@ -10,6 +10,11 @@
             ],
             "type": "string"
         },
+        "harry": {
+            "description": "Testing property for KAZOO-5878",
+            "stability_level": "alpha",
+            "type": "string"
+        },
         "settings": {
             "description": "Settings for the OneDrive account",
             "properties": {
